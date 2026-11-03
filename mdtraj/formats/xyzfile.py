@@ -265,25 +265,32 @@ class XYZTrajectoryFile:
     def _read(self):
         """Read a single frame."""
 
-        first = self._fh.readline()  # Number of atoms.
+        fh = self._fh
+        first = fh.readline()  # Number of atoms.
         if first == "":
             raise _EOF()
-        else:
-            self._n_atoms = int(first)
-        self._fh.readline()  # Comment line.
+        n_atoms = self._n_atoms = int(first)
+        fh.readline()  # Comment line.
         self._line_counter += 2
 
-        xyz = np.empty(shape=(self._n_atoms, 3))
-        types = np.empty(shape=self._n_atoms, dtype=str)
+        rows = [line.split()[1:4] for line in itertools.islice(fh, n_atoms)]
 
-        for i in range(self._n_atoms):
-            line = self._fh.readline()
-            if line == "":
-                raise _EOF()
-            split_line = line.split()
+        # Fast path: convert the whole frame at once.
+        if len(rows) == n_atoms:
             try:
-                types[i] = split_line[0]
-                xyz[i] = [float(x) for x in split_line[1:4]]
+                xyz = np.array(rows, dtype=float)
+            except ValueError:
+                xyz = None
+            if xyz is not None and xyz.shape == (n_atoms, 3):
+                self._line_counter += n_atoms
+                self._frame_index += 1
+                return xyz
+
+        # Slow path: parse row by row to report the offending line.
+        xyz = np.empty(shape=(n_atoms, 3))
+        for i, row in enumerate(rows):
+            try:
+                xyz[i] = [float(x) for x in row]
             except Exception:
                 raise OSError(
                     f'xyz parse error on line {self._line_counter:d} of "{self._filename:s}". '
@@ -291,6 +298,8 @@ class XYZTrajectoryFile:
                     "xyz file.",
                 )
             self._line_counter += 1
+        if len(rows) < n_atoms:
+            raise _EOF()
         # --- end body ---
 
         self._frame_index += 1
