@@ -325,56 +325,76 @@ class MDCRDTrajectoryFile:
 
     def _read(self):
         "Read a single frame"
-        i = 0
-        coords = np.empty(self._n_atoms * 3, dtype=np.float32)
+        n_values = self._n_atoms * 3
+        readline = self._fh.readline
+        parsed = False
         box = None
 
-        while i < self._n_atoms * 3:
-            line = self._fh.readline()
-            self._line_counter += 1
+        if n_values > 0:
+            # fast path: read a frame of full 80-column lines in one call and
+            # convert all fields in one numpy cast. Anything else is re-read by
+            # the line parser below.
+            n_lines = -(-n_values // 10)
+            size = 8 * n_values + n_lines
+            data = self._fh.read(size)
+            # any newline besides the line ends shortens the joined fields
+            fields = data.replace(b"\n", b"")
+            if (
+                len(data) == size
+                and data.endswith(b"\n")
+                and len(fields) == 8 * n_values
+                and data[80::81].count(b"\n") == n_values // 10
+                and b"\0" not in data
+            ):
+                try:
+                    coords = np.frombuffer(fields, "S8").astype(np.float32)
+                    parsed = True
+                    self._line_counter += n_lines
+                except ValueError:
+                    pass
+            if not parsed:
+                self._fh.seek(-len(data), 1)
 
-            if line == b"":
-                raise _EOF()
-            try:
-                items = [float(line[j : j + 8]) for j in range(0, len(line.rstrip()), 8)]
-                assert 0 < len(items) <= 10
-            except Exception:
-                raise OSError(
-                    'mdcrd parse error on line %d of "%s". This file '
-                    "does not appear to be a valid mdcrd file." % (self._line_counter, self._filename),
-                )
+        if not parsed:
+            values = []
+            while len(values) < n_values:
+                line = readline()
+                self._line_counter += 1
 
-            length = len(items)
+                if line == b"":
+                    raise _EOF()
+                try:
+                    items = [float(line[j : j + 8]) for j in range(0, len(line.rstrip()), 8)]
+                    assert 0 < len(items) <= 10
+                except Exception:
+                    raise OSError(
+                        'mdcrd parse error on line %d of "%s". This file '
+                        "does not appear to be a valid mdcrd file." % (self._line_counter, self._filename),
+                    )
 
-            if i + length > len(coords):
-                raise OSError(
-                    "mdcrd parse error: specified n_atoms (%d) is likely incorrect. "
-                    "Incorrect buffer size encountered on line=%d"
-                    % (
-                        self._n_atoms,
-                        self._line_counter,
-                    ),
-                )
+                if len(values) + len(items) > n_values:
+                    raise OSError(
+                        "mdcrd parse error: specified n_atoms (%d) is likely incorrect. "
+                        "Incorrect buffer size encountered on line=%d"
+                        % (
+                            self._n_atoms,
+                            self._line_counter,
+                        ),
+                    )
 
-            coords[i : i + length] = items
-            i += length
+                values.extend(items)
+            coords = np.array(values, dtype=np.float32)
 
-            if i == self._n_atoms * 3:
-                if self._has_box is False:
-                    break
-
-                # peek ahead for box
-                here = self._fh.tell()
-                line = self._fh.readline()
-                peek = [float(elem) for elem in line.strip().split()]
-                if len(peek) == 3:
-                    box = peek
-                else:
-                    if self._has_box is True:
-                        raise OSError("Box information not found in file.")
-                    self._fh.seek(-len(line), 1)
-                    self._fh.seek(here)
-                break
+        if n_values > 0 and self._has_box is not False:
+            # peek ahead for box
+            line = readline()
+            peek = list(map(float, line.split()))
+            if len(peek) == 3:
+                box = peek
+            else:
+                if self._has_box is True:
+                    raise OSError("Box information not found in file.")
+                self._fh.seek(-len(line), 1)
 
         self._frame_index += 1
         return coords.reshape(self._n_atoms, 3), box
